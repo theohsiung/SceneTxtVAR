@@ -176,24 +176,26 @@ class InfinityTrainer(object):
                     raw_features, _, _ = self.vae_local.encode_for_raw_features(inp_B3HW, scale_schedule=vae_scale_schedule)
             
             x_BLC_wo_prefix, gt_ms_idx_Bl = self.bitwise_self_correction.flip_requant(vae_scale_schedule, inp_B3HW, raw_features, device)
-            # x_BLC_wo_prefix: torch.Size([bs, 2*2+3*3+...+64*64, d or 4d])
+            # x_BLC_wo_prefix: torch.Size([bs, 2*2+3*3+...+64*64, d or 4d]) GPT input
+            # gt_ms_idx_Bl: torch.Size([bs, 2*2+3*3+...+64*64, d]) GPT ground truth (output for VAE)
 
             # truncate scales
             training_scales = args.always_training_scales
             training_seq_len = np.array(scale_schedule)[:training_scales].prod(axis=1).sum()
-            x_BLC_wo_prefix = x_BLC_wo_prefix[:, :(training_seq_len-np.array(scale_schedule[0]).prod()), :]
+            x_BLC_wo_prefix = x_BLC_wo_prefix[:, :(training_seq_len-np.array(scale_schedule[0]).prod()), :] # cut scales according to training_scales   
 
             self.gpt_wo_ddp.forward  
             logits_BLV = self.gpt(text_cond_tuple, x_BLC_wo_prefix, scale_schedule=scale_schedule[:training_scales]) # [bs, 1*1+...+64*64, vocab_size or log2(vocab_size)*2]
             self.batch_size, self.seq_len = logits_BLV.shape[:2]
 
-            self.seq_len_each = [idx_Bl.shape[1] for idx_Bl in gt_ms_idx_Bl]
-            
+            # get GT
+            self.seq_len_each = [idx_Bl.shape[1] for idx_Bl in gt_ms_idx_Bl]            
             gt_BL = torch.cat(gt_ms_idx_Bl, dim=1)[:,:training_seq_len].contiguous().type(torch.long) # [bs, 1*1+...+64*64, 16] or [bs, 1*1+...+64*64]
-            if args.use_bit_label:
+            
+            if args.use_bit_label: # default 1
                 tmp_bs, tmp_seq_len, tmp_channel = logits_BLV.shape
                 loss = self.train_loss(logits_BLV.reshape(tmp_bs, tmp_seq_len, -1, 2).permute(0,3,1,2), gt_BL)
-                if args.bitloss_type == 'mean':
+                if args.bitloss_type == 'mean': # default mean
                     loss = loss.mean(dim=-1)
                 elif args.bitloss_type == 'sum':
                     loss = loss.sum(dim=-1)
@@ -210,7 +212,7 @@ class InfinityTrainer(object):
                     lw.extend([last_scale_area / this_scale_area for _ in range(pt * ph * pw)])
                 lw = torch.tensor(lw, device=loss.device)[None, ...]
                 lw = lw / lw.sum()
-            else:
+            else: # default 0
                 lw = 1. / self.seq_len
             loss = loss.mul(lw).sum(dim=-1).mean()
         
@@ -218,7 +220,7 @@ class InfinityTrainer(object):
         grad_norm_t, scale_log2_t = self.gpt_opt.backward_clip_step(ep=ep, it=it, g_it=g_it, stepping=stepping, logging_params=logging_params, loss=loss, clip_decay_ratio=clip_decay_ratio, stable=args.stable)
         
         # update ema
-        if args.use_fsdp_model_ema:
+        if args.use_fsdp_model_ema: # default 0
             update_ema(self.gpt_ema, self.gpt)
 
         # [zero_grad]
